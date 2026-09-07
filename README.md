@@ -94,9 +94,17 @@ critter_counter/           <- this repo's app code
 Zip that whole folder and it runs anywhere — double-click `CritterCounter.exe`.
 
 Copying `models/speciesnet/` in matters: SpeciesNet otherwise downloads its weights
-from Kaggle on first run, so a fresh machine would need working network access and a
-healthy certificate store before it could process a single photo. When that folder is
-present the app uses it and never reaches the network.
+from Kaggle on first run, so a fresh machine would need working network access before
+it could process a single photo — and MegaDetector's own downloader already failed here
+with an SSL certificate error, so that is not a safe thing to depend on.
+
+Copy the folder **whole**. It contains its own copy of the MegaDetector weights under a
+URL-derived filename, duplicating `models/md_v5a.0.1.pt` (~268 MB of the total). That
+looks redundant, but SpeciesNet re-downloads it on load if it is missing — verified by
+deleting it and watching it come back — so removing it silently reintroduces the
+network dependency.
+
+Total payload: ~756 MB of models plus ~2.4 GB for the venv.
 
 ## Roadmap
 
