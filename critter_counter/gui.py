@@ -17,6 +17,7 @@ from pathlib import Path
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
+import cards
 import pipeline
 from config import load_config, save_config
 from pipeline import Event, run_pipeline
@@ -48,6 +49,7 @@ class CritterCounterApp(ctk.CTk):
 
         self.config_data = load_config()
         self.selected_folder: Path | None = None
+        self.card_identity = None
         self.progress_queue: queue.Queue = queue.Queue()
         self.run_in_progress = False
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -116,8 +118,29 @@ class CritterCounterApp(ctk.CTk):
 
     def _select_folder(self, folder: Path) -> None:
         self.selected_folder = folder
-        self.selected_label.configure(text=f"Selected: {folder}", text_color=("black", "white"))
-        self.go_button.configure(state="normal")
+        self.card_identity = None
+        self.selected_label.configure(text="Reading card...", text_color="gray")
+        self.go_button.configure(state="disabled")
+
+        # Identifying the card stats every photo on it, which is slow enough on a card
+        # reader to freeze the window, so it happens off the main thread.
+        threading.Thread(target=self._identify_card, args=(folder,), daemon=True).start()
+
+    def _identify_card(self, folder: Path) -> None:
+        try:
+            identity = cards.identify(folder)
+            summary = cards.describe(identity)
+        except Exception as exc:
+            identity, summary = None, f"Could not read {folder}\n{exc}"
+        self.after(0, self._show_card_identity, folder, identity, summary)
+
+    def _show_card_identity(self, folder: Path, identity, summary: str) -> None:
+        if self.selected_folder != folder:
+            return  # a different card was picked while this one was being read
+        self.card_identity = identity
+        self.selected_label.configure(text=summary, text_color=("black", "white"))
+        if identity is not None and identity.photo_count:
+            self.go_button.configure(state="normal")
 
     def show_select_frame(self) -> None:
         self.progress_frame.pack_forget()
@@ -171,6 +194,8 @@ class CritterCounterApp(ctk.CTk):
                 country=self.config_data["country"],
                 admin1_region=self.config_data["state"],
             )
+            if self.card_identity is not None:
+                cards.record_run(self.card_identity, session_folder)
             self.progress_queue.put(("done", session_folder, events))
         except pipeline.NoPhotosFound as exc:
             # Expected mistake (wrong folder picked), not a crash - no stack trace.
