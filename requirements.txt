@@ -1,5 +1,13 @@
-torch
-torchvision
-megadetector
-speciesnet
-openpyxl
+# Versions pinned to what this app was actually built and tested against.
+# torch-directml requires torch 2.4.1 exactly, which is why torch is pinned rather
+# than floating - installing a newer torch silently drops GPU support on AMD/Intel
+# machines and falls back to CPU, roughly a 5x slowdown.
+torch==2.4.1
+torchvision==0.19.1
+torch-directml==0.2.5.dev240914
+
+megadetector==10.0.25
+speciesnet==5.0.5
+
+customtkinter==6.0.0
+openpyxl==3.1.5

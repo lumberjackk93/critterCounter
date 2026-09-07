@@ -66,45 +66,49 @@ kept as-is, since they're still informative.
 ## Packaging for a non-technical user
 
 `gui.py` is the actual app (run it directly with `python gui.py` during development).
-For a double-click experience with no Python setup required, `launcher.py` builds into
-a tiny standalone `.exe` (via PyInstaller) that just hands off to the real GUI running
-under a portable Python install shipped alongside it — the heavy ML dependencies
-(PyTorch, SpeciesNet, etc.) are never themselves frozen into the exe, which is slow and
-fragile for a stack this size.
+`launcher.py` builds into a small standalone `.exe` that does first-run setup and then
+starts the GUI.
 
-Build the launcher:
+The download people actually click on is **~10 MB**. Everything heavy is fetched from
+its official source on first launch instead of being shipped:
+
+| Fetched on first run | Size | From |
+| --- | --- | --- |
+| Python + PyTorch + deps | ~2.4 GB | PyPI, via a downloaded `uv` binary |
+| MegaDetector weights | 268 MB | GitHub releases |
+| SpeciesNet weights | 488 MB | Kaggle, via SpeciesNet's own downloader |
+
+Setup is resumable and idempotent: each piece is skipped if already present, so a failed
+or cancelled run picks up where it left off rather than starting over. The heavy stack is
+never frozen into the exe, which is slow to build and fragile at this size.
+
+Build it:
 
 ```
-pyinstaller --onefile --noconsole --name CritterCounter launcher.py
+pyinstaller --onefile --noconsole --name CritterCounter --paths . --hidden-import certifi launcher.py
 ```
 
-Then assemble a distribution folder with this layout (venv/ and models/ are not part of
-this git repo — copy them in from a working dev setup, per Setup above):
+Ship `CritterCounter.exe`, `requirements.txt`, and `critter_counter/`. First run creates
+the rest alongside them:
 
 ```
 CritterCounter.exe
-venv/                      <- portable Python with all deps (pip install -r requirements.txt)
-models/
-  md_v5a.0.1.pt            <- MegaDetector weights
-  speciesnet/              <- SpeciesNet weights, copied from ~/.cache/kagglehub/
-                              models/google/speciesnet/pyTorch/v4.0.3a/1/
-critter_counter/           <- this repo's app code
+requirements.txt
+critter_counter/     <- app code
+tools/uv.exe         <- downloaded
+venv/                <- downloaded
+models/              <- downloaded
 ```
 
-Zip that whole folder and it runs anywhere — double-click `CritterCounter.exe`.
+Two things worth knowing before "simplifying" any of this:
 
-Copying `models/speciesnet/` in matters: SpeciesNet otherwise downloads its weights
-from Kaggle on first run, so a fresh machine would need working network access before
-it could process a single photo — and MegaDetector's own downloader already failed here
-with an SSL certificate error, so that is not a safe thing to depend on.
-
-Copy the folder **whole**. It contains its own copy of the MegaDetector weights under a
-URL-derived filename, duplicating `models/md_v5a.0.1.pt` (~268 MB of the total). That
-looks redundant, but SpeciesNet re-downloads it on load if it is missing — verified by
-deleting it and watching it come back — so removing it silently reintroduces the
-network dependency.
-
-Total payload: ~756 MB of models plus ~2.4 GB for the venv.
+- Downloads here pin **certifi**'s CA bundle rather than the system trust store.
+  MegaDetector's own downloader failed on the development machine with
+  `CERTIFICATE_VERIFY_FAILED`, while everything using certifi worked.
+- `models/speciesnet/` contains a second copy of the MegaDetector weights under a
+  URL-derived filename, duplicating `models/md_v5a.0.1.pt` (~268 MB). Deleting it to
+  save space does not work: SpeciesNet re-downloads it on load, verified by removing it
+  and watching it come back.
 
 ## Roadmap
 
