@@ -33,6 +33,10 @@ ctk.set_default_color_theme("green")
 WORK_DIR = Path.home() / ".critter_counter" / "work"
 LOG_PATH = Path.home() / ".critter_counter" / "last-run.log"
 
+WINDOW_WIDTH = 520
+# Labels must wrap inside this or a long path stretches the window off-screen.
+TEXT_WRAP_WIDTH = WINDOW_WIDTH - 60
+
 
 def detect_dcim_drives() -> list[Path]:
     drives = []
@@ -47,7 +51,7 @@ class CritterCounterApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Critter Counter")
-        self.geometry("520x540")
+        self.geometry(f"{WINDOW_WIDTH}x540")
         self.resizable(False, False)
 
         self.config_data = load_config()
@@ -88,8 +92,16 @@ class CritterCounterApp(ctk.CTk):
         ctk.CTkButton(f, text="Refresh", width=100, command=self._refresh_drive_buttons).pack(pady=(5, 15))
         ctk.CTkButton(f, text="Browse for a folder...", command=self._browse_folder).pack(pady=5)
 
-        self.selected_label = ctk.CTkLabel(f, text="No folder selected", text_color="gray")
-        self.selected_label.pack(pady=10)
+        # wraplength keeps long folder paths and card summaries inside the window
+        # instead of stretching it off the edge of the screen.
+        self.selected_label = ctk.CTkLabel(
+            f,
+            text="No folder selected",
+            text_color="gray",
+            wraplength=TEXT_WRAP_WIDTH,
+            justify="left",
+        )
+        self.selected_label.pack(pady=10, padx=20, fill="x")
 
         self.go_button = ctk.CTkButton(
             f, text="Go", font=ctk.CTkFont(size=18, weight="bold"), height=50,
@@ -182,8 +194,10 @@ class CritterCounterApp(ctk.CTk):
         )
         self.time_remaining_label.pack(pady=(4, 2))
 
-        self.progress_status_label = ctk.CTkLabel(f, text="Starting...", text_color="gray")
-        self.progress_status_label.pack(pady=(0, 8))
+        self.progress_status_label = ctk.CTkLabel(
+            f, text="Starting...", text_color="gray", wraplength=TEXT_WRAP_WIDTH
+        )
+        self.progress_status_label.pack(pady=(0, 8), padx=20, fill="x")
         ctk.CTkLabel(
             f, text="This can take several hours for a full card.\nYou can leave this running in the background.",
             text_color="gray",
@@ -268,8 +282,10 @@ class CritterCounterApp(ctk.CTk):
     def _build_results_frame(self) -> None:
         f = self.results_frame
         ctk.CTkLabel(f, text="Done!", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(30, 10))
-        self.results_summary_label = ctk.CTkLabel(f, text="", justify="left")
-        self.results_summary_label.pack(pady=10, padx=30)
+        self.results_summary_label = ctk.CTkLabel(
+            f, text="", justify="left", wraplength=TEXT_WRAP_WIDTH
+        )
+        self.results_summary_label.pack(pady=10, padx=30, fill="x")
 
         self.open_photos_button = ctk.CTkButton(f, text="Open Photos Folder", command=self._open_photos)
         self.open_photos_button.pack(pady=8)

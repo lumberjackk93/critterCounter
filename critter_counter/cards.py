@@ -186,5 +186,7 @@ def describe(identity: CardIdentity, history: Optional[dict] = None) -> str:
             f"Processed before on {when}, but the contents have changed ({changed}). "
             "This will be treated as a new job."
         )
-    lines.append(f"Last result: {last.get('session', 'unknown')}")
+    # Just the folder name: the full path is long enough to dominate the window.
+    session = last.get("session", "")
+    lines.append(f"Last result: {Path(session).name if session else 'unknown'}")
     return "\n".join(lines)
