@@ -42,6 +42,38 @@ Past roughly a GTX 1070, **the GPU stops being the bottleneck.** Going from a 10
 4090 is a ~12x faster detector but only a ~1.4x faster job. That is the single most
 useful thing on this page if you are deciding what to buy.
 
+## Per full card (10,000 photos)
+
+A trail cam caps each folder at 9,999 photos, so this is the realistic unit of work.
+Everything scales linearly — fixed costs like model loading (~30 s) disappear into the
+noise at this size.
+
+| GPU | Detector | Classifier (CPU) | Total |
+| --- | --- | --- | --- |
+| CPU only, 1 core | 12 h 38 m | 52 min | **13.5 h** |
+| CPU only, 11 cores | 4 h 42 m | 52 min | **5.6 h** |
+| Radeon 840M (this laptop) | 3 h 14 m | 52 min | **4.1 h** |
+| Radeon 780M / RX 6600 | 33 min | 52 min | **1.4 h** |
+| GTX 1070 | 21 min | 52 min | **1.2 h** |
+| RTX 3060 | 11 min | 52 min | **1.05 h** |
+| RTX 4070 | 5 min | 52 min | **~1 h** |
+| RTX 4090 | 2 min | 52 min | **~0.9 h** |
+
+At this scale the conclusion from the previous section gets sharper: **on anything from
+a GTX 1070 upward, a full card takes about an hour, and roughly all of it is the CPU
+classifier.** The spread between a 1070 and a 4090 is about 15 minutes across a
+10,000-photo card.
+
+Two floors sit underneath these numbers regardless of GPU:
+
+- **Reading the card.** 10,000 photos is roughly 12 GB. Over a typical SD reader
+  (~30 MB/s) that is ~7 minutes just to move the bytes; a fast USB 3 reader cuts it to
+  ~2 minutes. On a 4090 that makes card I/O slower than the actual detection.
+- **The classifier's 52 minutes**, which no graphics card touches.
+
+Sanity check: this model predicts 8.9 h of detection for the 27,618-photo card being
+processed on the development machine, against ~9 h actually observed.
+
 ## NVIDIA (CUDA)
 
 | GPU | ~FP32 TFLOPS | Est. img/s | 1,000 photos |
