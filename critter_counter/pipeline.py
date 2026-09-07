@@ -83,6 +83,19 @@ _DIST_ROOT = _find_distribution_root()
 VENV_PYTHON = _DIST_ROOT / "venv" / "Scripts" / "python.exe"
 DETECTOR_MODEL = _DIST_ROOT / "models" / "md_v5a.0.1.pt"
 
+# SpeciesNet normally downloads its weights from Kaggle into a per-user cache on first
+# run. A packaged copy ships them instead, so point at the local folder when it's
+# present - otherwise a fresh machine needs network access (and a working cert store,
+# which is exactly what failed here) before it can process a single photo.
+_LOCAL_SPECIESNET_MODEL = _DIST_ROOT / "models" / "speciesnet"
+DEFAULT_SPECIESNET_MODEL = "kaggle:google/speciesnet/pyTorch/v4.0.3a/1"
+
+
+def speciesnet_model() -> str:
+    if (_LOCAL_SPECIESNET_MODEL / "info.json").exists():
+        return str(_LOCAL_SPECIESNET_MODEL)
+    return DEFAULT_SPECIESNET_MODEL
+
 CATEGORY_LABEL = {"1": "animal", "2": "human", "3": "vehicle"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg"}
 
@@ -307,6 +320,8 @@ def run_classifier_stage(
         str(VENV_PYTHON),
         "-m",
         "speciesnet.scripts.run_model",
+        "--model",
+        speciesnet_model(),
         "--classifier_only",
         "--detections_json",
         str(detections_json),
@@ -339,6 +354,8 @@ def run_ensemble_stage(
         str(VENV_PYTHON),
         "-m",
         "speciesnet.scripts.run_model",
+        "--model",
+        speciesnet_model(),
         "--ensemble_only",
         "--classifications_json",
         str(classifications_json),

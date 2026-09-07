@@ -39,8 +39,29 @@ For GPU acceleration on a machine without an NVIDIA GPU, also install `torch-dir
 python run_card.py <path to SD card / DCIM folder>
 ```
 
-Settings (output folder, confidence threshold, event grouping window) live in
-`~/.critter_counter/config.json`, created on first run — see `config.py` for defaults.
+Re-running the same card is cheap: each stage caches its output, so a repeat run skips
+straight to regenerating the photo folders and report. That is the fast way to see the
+effect of a different confidence threshold without redoing hours of inference.
+
+### Settings
+
+`~/.critter_counter/config.json`, created on first run (see `config.py` for defaults):
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `output_folder` | `~/Documents/Good Game Pics` | Where sorted photos and reports go |
+| `species_confidence_threshold` | `0.7` | Below this, a photo is filed as "Unknown" instead of guessing a species |
+| `event_gap_seconds` | `10` | Photos closer together than this count as one trigger event |
+| `country` | `USA` | ISO-3166 country used to rule out implausible species |
+| `state` | *(unset)* | Two-letter state/region code, e.g. `TX`. Narrows species further — worth setting, since it should move photos out of the Unknown bucket |
+
+### About the "Unknown" bucket
+
+A photo lands in `Unknown` when something is definitely there but the species is
+uncertain — either the score is below the threshold, or the model rolls up to a
+non-answer (`no cv result`, or a bare `animal`). These are still real animal photos and
+are kept; only the species label is withheld. Partial IDs like `bird` or `mammal` are
+kept as-is, since they're still informative.
 
 ## Packaging for a non-technical user
 
@@ -62,12 +83,20 @@ this git repo — copy them in from a working dev setup, per Setup above):
 
 ```
 CritterCounter.exe
-venv/              <- portable Python with all deps installed (pip install -r requirements.txt)
-models/            <- MegaDetector + SpeciesNet weights
-critter_counter/   <- this repo's app code
+venv/                      <- portable Python with all deps (pip install -r requirements.txt)
+models/
+  md_v5a.0.1.pt            <- MegaDetector weights
+  speciesnet/              <- SpeciesNet weights, copied from ~/.cache/kagglehub/
+                              models/google/speciesnet/pyTorch/v4.0.3a/1/
+critter_counter/           <- this repo's app code
 ```
 
 Zip that whole folder and it runs anywhere — double-click `CritterCounter.exe`.
+
+Copying `models/speciesnet/` in matters: SpeciesNet otherwise downloads its weights
+from Kaggle on first run, so a fresh machine would need working network access and a
+healthy certificate store before it could process a single photo. When that folder is
+present the app uses it and never reaches the network.
 
 ## Roadmap
 

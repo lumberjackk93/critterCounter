@@ -1,5 +1,7 @@
 venv/
-models/*.pt
+# Whole folder, not just models/*.pt: the SpeciesNet weights live in a subfolder and
+# slipped past the narrower pattern, staging ~500MB of binaries GitHub would reject.
+models/
 *.exe
 build/
 dist/
