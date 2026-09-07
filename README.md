@@ -88,17 +88,26 @@ Build it:
 pyinstaller --onefile --noconsole --name CritterCounter --paths . --hidden-import certifi launcher.py
 ```
 
-Ship `CritterCounter.exe`, `requirements.txt`, and `critter_counter/`. First run creates
-the rest alongside them:
+Ship `CritterCounter.exe`, both requirements files, and `critter_counter/`. First run
+creates the rest alongside them:
 
 ```
 CritterCounter.exe
 requirements.txt
+requirements-speciesnet.txt
 critter_counter/     <- app code
 tools/uv.exe         <- downloaded
 venv/                <- downloaded
 models/              <- downloaded
 ```
+
+**Dependencies install in two passes, and the order is load-bearing.** megadetector
+pins `protobuf<=3.20.1` (through ultralytics-yolov5) while speciesnet needs a modern
+`onnx` that requires newer protobuf. Resolving both at once — with pip *or* uv — makes
+the resolver backtrack to `onnx` 1.12, which has no Python 3.12 wheel and fails to build
+without cmake. Installing speciesnet separately lets the second pass upgrade protobuf
+and take a prebuilt onnx wheel. uv provisions Python (no admin rights needed) but does
+not do the installing.
 
 Two things worth knowing before "simplifying" any of this:
 

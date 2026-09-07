@@ -26,11 +26,30 @@ MEGADETECTOR_URL = (
     "https://github.com/agentmorris/MegaDetector/releases/download/v5.0/md_v5a.0.1.pt"
 )
 SPECIESNET_MODEL_ID = "kaggle:google/speciesnet/pyTorch/v4.0.3a/1"
+REQUIREMENTS_SPECIESNET = "requirements-speciesnet.txt"
 
 StatusCallback = Callable[[str, Optional[float]], None]
 
 # Hides the console windows that would otherwise flash up for each subprocess.
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+
+class SetupFailed(RuntimeError):
+    """Setup step failed, carrying the tool's own error text.
+
+    Setup runs windowless, so a bare CalledProcessError would discard the only
+    explanation of what went wrong and leave nothing to act on.
+    """
+
+
+def _run(args: list[str], what: str) -> None:
+    result = subprocess.run(
+        args, capture_output=True, text=True, creationflags=_NO_WINDOW
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        tail = "\n".join(detail.splitlines()[-15:])
+        raise SetupFailed(f"{what} failed.\n\n{tail}")
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -103,8 +122,11 @@ def venv_python(root: Path) -> Path:
 def _requirements_stamp(root: Path) -> str:
     import hashlib
 
-    text = (root / "requirements.txt").read_bytes()
-    return hashlib.sha1(text).hexdigest()
+    digest = hashlib.sha1()
+    for name in ("requirements.txt", REQUIREMENTS_SPECIESNET):
+        path = root / name
+        digest.update(path.read_bytes() if path.exists() else b"")
+    return digest.hexdigest()
 
 
 def _install_marker(root: Path) -> Path:
@@ -139,25 +161,37 @@ def ensure_venv(root: Path, on_status: StatusCallback) -> Path:
 
     on_status("Setting up Python...", None)
     if not python.exists():
-        subprocess.run(
-            [str(uv), "venv", str(root / "venv"), "--python", "3.12"],
-            check=True,
-            creationflags=_NO_WINDOW,
+        # --seed puts pip in the venv; uv is used to provision Python (it needs no
+        # admin rights) but not to install, see below.
+        _run(
+            [str(uv), "venv", str(root / "venv"), "--python", "3.12", "--seed"],
+            "Creating the Python environment",
         )
 
+    # Two passes, with pip rather than uv, both deliberate. megadetector pins
+    # protobuf<=3.20.1 (via ultralytics-yolov5) while speciesnet needs a modern onnx
+    # that requires newer protobuf. Resolving them together makes any resolver backtrack
+    # to onnx 1.12, which has no Python 3.12 wheel and fails to compile without cmake.
+    # Installing in sequence lets the second pass upgrade protobuf and take a prebuilt
+    # onnx, which is how the tested environment was actually built. See
+    # requirements-speciesnet.txt.
     on_status("Downloading AI libraries (this is the long part)...", None)
-    subprocess.run(
+    _run(
+        [str(python), "-m", "pip", "install", "-r", str(root / "requirements.txt")],
+        "Installing the AI libraries",
+    )
+
+    on_status("Downloading the species identification library...", None)
+    _run(
         [
-            str(uv),
+            str(python),
+            "-m",
             "pip",
             "install",
-            "--python",
-            str(python),
             "-r",
-            str(root / "requirements.txt"),
+            str(root / REQUIREMENTS_SPECIESNET),
         ],
-        check=True,
-        creationflags=_NO_WINDOW,
+        "Installing the species identification library",
     )
 
     _install_marker(root).write_text(_requirements_stamp(root), encoding="utf-8")
@@ -182,11 +216,16 @@ def ensure_models(root: Path, on_status: StatusCallback) -> None:
     )
     result = subprocess.run(
         [str(venv_python(root)), "-c", fetch],
-        check=True,
         capture_output=True,
         text=True,
         creationflags=_NO_WINDOW,
     )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise SetupFailed(
+            "Downloading the species model failed.\n\n"
+            + "\n".join(detail.splitlines()[-15:])
+        )
 
     cached_dir = Path(result.stdout.strip().splitlines()[-1]).parent
     speciesnet_dir.mkdir(parents=True, exist_ok=True)

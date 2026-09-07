@@ -1,0 +1,12 @@
+# Installed AFTER requirements.txt, as a separate pip invocation. This is deliberate.
+#
+# megadetector depends on ultralytics-yolov5, which pins protobuf<=3.20.1. speciesnet
+# needs a modern onnx, which needs protobuf>=3.20.2. Resolving both sets at once - with
+# pip or uv - makes the resolver backtrack to onnx 1.12, which has no Python 3.12 wheel,
+# so it tries to compile from source and fails for want of cmake.
+#
+# Installing speciesnet in a second pass lets pip upgrade protobuf and take onnx 1.22
+# (a prebuilt wheel), emitting a warning about ultralytics-yolov5 that is safe here:
+# nothing in this app uses the protobuf-dependent parts of yolov5. This is also exactly
+# how the tested environment was built.
+speciesnet==5.0.5
