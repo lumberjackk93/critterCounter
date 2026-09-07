@@ -15,8 +15,9 @@ import traceback
 from pathlib import Path
 
 import customtkinter as ctk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
+import pipeline
 from config import load_config
 from pipeline import Event, run_pipeline
 
@@ -48,6 +49,8 @@ class CritterCounterApp(ctk.CTk):
         self.config_data = load_config()
         self.selected_folder: Path | None = None
         self.progress_queue: queue.Queue = queue.Queue()
+        self.run_in_progress = False
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.select_frame = ctk.CTkFrame(self)
         self.progress_frame = ctk.CTkFrame(self)
@@ -138,6 +141,7 @@ class CritterCounterApp(ctk.CTk):
         self.progress_bar.set(0)
         self.progress_status_label.configure(text="Starting...")
         self.progress_frame.pack(fill="both", expand=True)
+        self.run_in_progress = True
 
         thread = threading.Thread(target=self._run_pipeline_thread, daemon=True)
         thread.start()
@@ -156,6 +160,8 @@ class CritterCounterApp(ctk.CTk):
                 on_progress=on_progress,
                 confidence_threshold=self.config_data["species_confidence_threshold"],
                 event_gap_seconds=self.config_data["event_gap_seconds"],
+                country=self.config_data["country"],
+                admin1_region=self.config_data["state"],
             )
             self.progress_queue.put(("done", session_folder, events))
         except Exception:
@@ -172,10 +178,12 @@ class CritterCounterApp(ctk.CTk):
                     self.progress_status_label.configure(text=status)
                 elif kind == "done":
                     _, session_folder, events = message
+                    self.run_in_progress = False
                     self._show_results(session_folder, events)
                     return
                 elif kind == "error":
                     _, error_text, _ = message
+                    self.run_in_progress = False
                     self._show_error(error_text)
                     return
         except queue.Empty:
@@ -198,6 +206,25 @@ class CritterCounterApp(ctk.CTk):
         ctk.CTkButton(f, text="Process Another Card", command=self.show_select_frame).pack(pady=(25, 10))
 
         self._result_session_folder: Path | None = None
+
+    def _on_close(self) -> None:
+        """Stops the model subprocess before exiting.
+
+        Without this the detector keeps running in the background after the window is
+        gone - hours of invisible CPU/GPU work the user has no way to stop.
+        """
+
+        if self.run_in_progress:
+            keep_going = messagebox.askyesno(
+                "Stop processing?",
+                "Processing is still running. Stop it and close?\n\n"
+                "Finished work is saved - starting this card again will pick up "
+                "where it left off.",
+            )
+            if not keep_going:
+                return
+            pipeline.terminate_active_process()
+        self.destroy()
 
     def _build_error_frame(self) -> None:
         f = self.error_frame

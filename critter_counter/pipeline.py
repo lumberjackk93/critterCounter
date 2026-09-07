@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -91,7 +92,11 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg"}
 # the raw classifier confidence, not confidence in "no cv result" itself.
 SPECIES_CONFIDENCE_THRESHOLD = 0.7
 UNKNOWN_LABEL = "Unknown"
-_NO_CV_RESULT = "no cv result"
+# Labels that confirm something was in frame but say nothing about what it was.
+# "no cv result" is SpeciesNet's own placeholder; a bare "animal" is the top of the
+# taxonomy, meaning it could not roll up to anything more specific. Partial IDs like
+# "bird" or "mammal" are genuinely useful, so they are kept as-is.
+_UNINFORMATIVE_LABELS = {"no cv result", "animal"}
 _INVALID_FOLDER_CHARS = str.maketrans({c: "-" for c in '/\\:*?"<>|'})
 
 # Photos taken less than this many seconds apart are treated as one trigger event.
@@ -133,6 +138,31 @@ class Event:
         )
 
 
+_active_process: Optional[subprocess.Popen] = None
+_active_process_lock = threading.Lock()
+
+
+def terminate_active_process() -> bool:
+    """Stops the in-flight model subprocess, if there is one.
+
+    The heavy lifting happens in child processes, so closing the app without this
+    would leave one running invisibly for hours with no window to stop it from.
+    """
+
+    with _active_process_lock:
+        process = _active_process
+
+    if process is None or process.poll() is not None:
+        return False
+
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+    return True
+
+
 def _run_with_progress(
     args: list[str], on_stage_progress: Optional[Callable[[float], None]] = None
 ) -> None:
@@ -149,6 +179,10 @@ def _run_with_progress(
 
     process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     assert process.stderr is not None
+
+    global _active_process
+    with _active_process_lock:
+        _active_process = process
 
     # Read in chunks, not per-character: tqdm redraws its bar many times a second and
     # a slow reader lets the pipe buffer fill, which blocks the child mid-inference and
@@ -177,6 +211,10 @@ def _run_with_progress(
                 on_stage_progress(min(n / total, 1.0))
 
     process.wait()
+
+    with _active_process_lock:
+        _active_process = None
+
     if process.returncode != 0:
         raise subprocess.CalledProcessError(process.returncode, args)
 
@@ -288,10 +326,15 @@ def run_ensemble_stage(
     classifications_json: Path,
     detections_json: Path,
     output_json: Path,
+    country: str = "USA",
+    admin1_region: str = "",
 ) -> None:
     if output_json.exists():
         return
 
+    # Geofencing happens here, not in the classifier, so the location has to be passed
+    # to this stage - without it the ensemble discards plausible local species and
+    # falls back to its "no cv result" placeholder. A state/province narrows it further.
     args = [
         str(VENV_PYTHON),
         "-m",
@@ -305,10 +348,45 @@ def run_ensemble_stage(
         str(filepaths_txt),
         "--predictions_json",
         str(output_json),
+        "--country",
+        country,
         "--bypass_prompts",
         "--noprogress_bars",
     ]
-    subprocess.run(args, check=True)
+    if admin1_region:
+        args += ["--admin1_region", admin1_region]
+    # Routed through the tracked runner (with a no-op progress sink) so this stage is
+    # also cancellable, even though it finishes in seconds.
+    _run_with_progress(args, lambda _fraction: None)
+
+
+_EXIF_DATETIME_ORIGINAL = 0x9003
+_EXIF_IFD_POINTER = 0x8769
+_EXIF_DATETIME = 0x0132
+
+
+def image_timestamp(path: Path) -> datetime:
+    """Capture time from EXIF, falling back to the file's modified time.
+
+    Event grouping keys off this, and mtime alone is not trustworthy: copying photos
+    off a card with a tool that doesn't preserve timestamps would give every photo the
+    same time and collapse a whole card into one enormous "event".
+    """
+
+    try:
+        from PIL import Image
+
+        with Image.open(path) as img:
+            exif = img.getexif()
+            raw = exif.get_ifd(_EXIF_IFD_POINTER).get(_EXIF_DATETIME_ORIGINAL)
+            if not raw:
+                raw = exif.get(_EXIF_DATETIME)
+        if raw:
+            return datetime.strptime(str(raw).strip(), "%Y:%m:%d %H:%M:%S")
+    except Exception:
+        pass
+
+    return datetime.fromtimestamp(path.stat().st_mtime)
 
 
 def species_common_name(prediction: str) -> str:
@@ -333,7 +411,7 @@ def load_results(
     results: dict[str, ImageResult] = {}
     for pred in data["predictions"]:
         filepath = Path(pred["filepath"])
-        timestamp = datetime.fromtimestamp(filepath.stat().st_mtime)
+        timestamp = image_timestamp(filepath)
         name = species_common_name(pred.get("prediction", ""))
         score = pred.get("prediction_score", 0.0)
         detections = pred.get("detections") or []
@@ -341,7 +419,7 @@ def load_results(
         animal_box_count = len(detections)
 
         if has_detection:
-            if name == _NO_CV_RESULT or score < confidence_threshold:
+            if name in _UNINFORMATIVE_LABELS or score < confidence_threshold:
                 name = UNKNOWN_LABEL
             else:
                 name = sanitize_folder_name(name)
@@ -470,6 +548,8 @@ def run_pipeline(
     on_progress: Optional[ProgressCallback] = None,
     confidence_threshold: float = SPECIES_CONFIDENCE_THRESHOLD,
     event_gap_seconds: int = EVENT_GAP_SECONDS,
+    country: str = "USA",
+    admin1_region: str = "",
 ) -> tuple[Path, list[Event]]:
     """Runs the full pipeline for one card.
 
@@ -508,11 +588,11 @@ def run_pipeline(
     )
 
     detections_json = work_dir / "detections_speciesnet_format.json"
-    convert_md_to_speciesnet_format(md_json, detections_json, source_folder)
+    convert_md_to_speciesnet_format(md_json, detections_json, source_folder, country)
 
     classifications_json = work_dir / "classifications.json"
     run_classifier_stage(
-        filepaths_txt, detections_json, classifications_json,
+        filepaths_txt, detections_json, classifications_json, country,
         on_stage_progress=lambda f: report("classifier", f),
     )
 
@@ -520,7 +600,10 @@ def run_pipeline(
         on_progress(sum(list(STAGE_WEIGHTS.values())[:2]), "Finalizing results...")
 
     ensemble_json = work_dir / "ensemble.json"
-    run_ensemble_stage(filepaths_txt, classifications_json, detections_json, ensemble_json)
+    run_ensemble_stage(
+        filepaths_txt, classifications_json, detections_json, ensemble_json,
+        country, admin1_region,
+    )
 
     results = load_results(ensemble_json, confidence_threshold)
     events = group_into_events(list(results.values()), event_gap_seconds)

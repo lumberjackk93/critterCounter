@@ -25,6 +25,8 @@ def main() -> None:
         work_dir,
         confidence_threshold=config["species_confidence_threshold"],
         event_gap_seconds=config["event_gap_seconds"],
+        country=config["country"],
+        admin1_region=config["state"],
     )
     print(f"Done. {len(events)} events found. Results in: {session_folder}")
 

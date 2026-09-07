@@ -153,6 +153,26 @@ def test_no_cv_result_becomes_unknown_even_when_score_is_high(tmp_path):
     assert result.species == pipeline.UNKNOWN_LABEL
 
 
+def test_bare_animal_label_becomes_unknown(tmp_path):
+    """Top-of-taxonomy "animal" says nothing more than Unknown already does."""
+
+    ensemble = _write_ensemble(
+        tmp_path, [("a.JPG", "id;;;;;;animal", 0.99, ANIMAL_BOX)]
+    )
+    result = next(iter(load_results(ensemble).values()))
+    assert result.species == pipeline.UNKNOWN_LABEL
+
+
+def test_partial_taxonomy_labels_are_kept(tmp_path):
+    """"bird" is a useful partial ID, unlike a bare "animal"."""
+
+    ensemble = _write_ensemble(
+        tmp_path, [("b.JPG", "id;aves;;;;;bird", 0.99, ANIMAL_BOX)]
+    )
+    result = next(iter(load_results(ensemble).values()))
+    assert result.species == "bird"
+
+
 def test_low_confidence_species_becomes_unknown(tmp_path):
     ensemble = _write_ensemble(
         tmp_path,
@@ -181,6 +201,35 @@ def test_detector_box_overridden_to_blank_is_not_a_good_photo(tmp_path):
     result = next(iter(load_results(ensemble).values()))
     assert not result.has_detection
     assert result.species == "blank"
+
+
+def test_timestamp_prefers_exif_over_file_mtime(tmp_path):
+    """A copy tool that rewrites mtime must not collapse a card into one event."""
+
+    from PIL import Image
+
+    path = tmp_path / "MUD_0001.JPG"
+    image = Image.new("RGB", (8, 8))
+    exif = image.getexif()
+    exif.get_ifd(0x8769)[0x9003] = "2026:05:11 18:37:55"
+    image.save(path, exif=exif)
+
+    # Push mtime far away from the real capture time.
+    import os
+
+    os.utime(path, (0, 0))
+
+    assert pipeline.image_timestamp(path) == datetime(2026, 5, 11, 18, 37, 55)
+
+
+def test_timestamp_falls_back_to_mtime_without_exif(tmp_path):
+    path = tmp_path / "no_exif.JPG"
+    path.write_bytes(b"not really a jpeg")
+
+    import os
+
+    os.utime(path, (1_000_000, 1_000_000))
+    assert pipeline.image_timestamp(path) == datetime.fromtimestamp(1_000_000)
 
 
 def test_species_name_parsing_and_sanitizing():

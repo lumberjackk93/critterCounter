@@ -11,6 +11,11 @@ DEFAULTS = {
     "output_folder": str(Path.home() / "Documents" / "Good Game Pics"),
     "species_confidence_threshold": 0.7,
     "event_gap_seconds": 10,
+    # Location narrows which species are considered plausible. Setting the state
+    # (a two-letter code like "TX") on top of the country measurably reduces photos
+    # that land in the Unknown bucket.
+    "country": "USA",
+    "state": "",
 }
 
 
