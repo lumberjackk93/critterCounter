@@ -27,6 +27,44 @@ from typing import Callable, Optional
 ProgressCallback = Callable[[float, str], None]
 
 
+_LOG_PATH: Optional[Path] = None
+
+
+def set_log_file(path: Optional[Path]) -> None:
+    """Sends subprocess output to a log file as well as stderr.
+
+    The GUI runs under pythonw.exe, which has no console and no stderr, so without a
+    log there is no record at all of what the detector or classifier reported.
+    """
+
+    global _LOG_PATH
+    _LOG_PATH = path
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _emit(text: str) -> None:
+    """Passes child output onward, tolerating the absence of a console.
+
+    sys.stderr is None under pythonw.exe; writing to it unguarded crashes the run.
+    """
+
+    stream = sys.stderr
+    if stream is not None:
+        try:
+            stream.write(text)
+            stream.flush()
+        except (ValueError, OSError):
+            pass
+
+    if _LOG_PATH is not None:
+        try:
+            with open(_LOG_PATH, "a", encoding="utf-8", errors="replace") as handle:
+                handle.write(text)
+        except OSError:
+            pass
+
+
 class NoPhotosFound(Exception):
     """Raised when the chosen folder has no photos, so the user gets an explanation
     rather than a stack trace from deep inside the detector."""
@@ -213,8 +251,7 @@ def _run_with_progress(
         if not raw:
             break
         chunk = raw.decode("utf-8", errors="replace")
-        sys.stderr.write(chunk)
-        sys.stderr.flush()
+        _emit(chunk)
 
         buf += chunk
         segments = re.split(r"[\r\n]", buf)

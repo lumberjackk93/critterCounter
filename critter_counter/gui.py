@@ -29,6 +29,7 @@ ctk.set_default_color_theme("green")
 # rather than next to the app so it still works if the app is installed somewhere
 # read-only, and so it survives replacing the app folder with a newer build.
 WORK_DIR = Path.home() / ".critter_counter" / "work"
+LOG_PATH = Path.home() / ".critter_counter" / "last-run.log"
 
 
 def detect_dcim_drives() -> list[Path]:
@@ -53,6 +54,7 @@ class CritterCounterApp(ctk.CTk):
         self.progress_queue: queue.Queue = queue.Queue()
         self.run_in_progress = False
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        pipeline.set_log_file(LOG_PATH)
 
         self.select_frame = ctk.CTkFrame(self)
         self.progress_frame = ctk.CTkFrame(self)
@@ -378,7 +380,10 @@ class CritterCounterApp(ctk.CTk):
         ctk.CTkLabel(
             f, text="Nothing was lost - finished work is saved and will be reused on retry.",
             text_color="gray",
-        ).pack(pady=(0, 10))
+        ).pack(pady=(0, 2))
+        ctk.CTkLabel(f, text=f"Details logged to {LOG_PATH}", text_color="gray").pack(
+            pady=(0, 8)
+        )
         self.error_detail = ctk.CTkTextbox(f, width=450, height=160, wrap="word")
         self.error_detail.pack(padx=20, pady=5)
         self.error_detail.configure(state="disabled")

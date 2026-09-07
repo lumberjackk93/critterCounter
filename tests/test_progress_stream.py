@@ -50,6 +50,33 @@ def test_raises_on_failure():
         _run_with_progress([sys.executable, "-c", failing], lambda _: None)
 
 
+def test_runs_without_a_console(monkeypatch):
+    """pythonw.exe has no stderr; writing to it unguarded crashed every GUI run."""
+
+    import pipeline
+
+    monkeypatch.setattr(sys, "stderr", None)
+    seen = []
+    _run_with_progress([sys.executable, "-c", EMITTER], seen.append)
+    assert seen[-1] == pytest.approx(1.0)
+
+
+def test_output_goes_to_the_log_file_when_set(tmp_path, monkeypatch):
+    """With no console, the log is the only record of what the tools reported."""
+
+    import pipeline
+
+    log = tmp_path / "last-run.log"
+    pipeline.set_log_file(log)
+    monkeypatch.setattr(sys, "stderr", None)
+    try:
+        _run_with_progress([sys.executable, "-c", EMITTER], lambda _: None)
+    finally:
+        pipeline.set_log_file(None)
+
+    assert "Done" in log.read_text(encoding="utf-8")
+
+
 def test_terminate_reports_false_when_nothing_is_running():
     assert terminate_active_process() is False
 
