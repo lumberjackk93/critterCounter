@@ -42,9 +42,34 @@ python run_card.py <path to SD card / DCIM folder>
 Settings (output folder, confidence threshold, event grouping window) live in
 `~/.critter_counter/config.json`, created on first run — see `config.py` for defaults.
 
+## Packaging for a non-technical user
+
+`gui.py` is the actual app (run it directly with `python gui.py` during development).
+For a double-click experience with no Python setup required, `launcher.py` builds into
+a tiny standalone `.exe` (via PyInstaller) that just hands off to the real GUI running
+under a portable Python install shipped alongside it — the heavy ML dependencies
+(PyTorch, SpeciesNet, etc.) are never themselves frozen into the exe, which is slow and
+fragile for a stack this size.
+
+Build the launcher:
+
+```
+pyinstaller --onefile --noconsole --name CritterCounter launcher.py
+```
+
+Then assemble a distribution folder with this layout (venv/ and models/ are not part of
+this git repo — copy them in from a working dev setup, per Setup above):
+
+```
+CritterCounter.exe
+venv/              <- portable Python with all deps installed (pip install -r requirements.txt)
+models/            <- MegaDetector + SpeciesNet weights
+critter_counter/   <- this repo's app code
+```
+
+Zip that whole folder and it runs anywhere — double-click `CritterCounter.exe`.
+
 ## Roadmap
 
-- GUI wrapper (plug in a card, hit "Go")
-- Packaged standalone `.exe` via PyInstaller
 - Integration with Backcountry Steward once that service has a public API
   (`export_hooks.py` has the seam)

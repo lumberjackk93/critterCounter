@@ -1,5 +1,9 @@
 venv/
 models/*.pt
+*.exe
+build/
+dist/
+*.spec
 work/
 work_card/
 test_subset/
