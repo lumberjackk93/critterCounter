@@ -77,6 +77,27 @@ def test_output_goes_to_the_log_file_when_set(tmp_path, monkeypatch):
     assert "Done" in log.read_text(encoding="utf-8")
 
 
+def test_child_processes_get_no_console_window(monkeypatch):
+    """Without CREATE_NO_WINDOW every stage pops a console over the user's screen."""
+
+    import pipeline
+
+    if pipeline._NO_WINDOW == 0:
+        pytest.skip("Windows-only behaviour")
+
+    captured = {}
+    real_popen = subprocess.Popen
+
+    def spy(args, **kwargs):
+        captured.update(kwargs)
+        return real_popen(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    _run_with_progress([sys.executable, "-c", EMITTER], lambda _: None)
+
+    assert captured.get("creationflags") == pipeline._NO_WINDOW
+
+
 def test_terminate_reports_false_when_nothing_is_running():
     assert terminate_active_process() is False
 

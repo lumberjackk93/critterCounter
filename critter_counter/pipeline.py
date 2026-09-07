@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -69,6 +70,10 @@ class NoPhotosFound(Exception):
     """Raised when the chosen folder has no photos, so the user gets an explanation
     rather than a stack trace from deep inside the detector."""
 _PROGRESS_RE = re.compile(r"(\d+)/(\d+)")
+
+# CREATE_NO_WINDOW. Every stage runs as a child process, and without this each one
+# opens its own console window on top of whatever the user is doing.
+_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 # Rough share of total wall-clock time each stage takes, used to blend per-stage
 # progress into one overall bar. Detection (GPU) dominates; classification (CPU) is
@@ -230,10 +235,15 @@ def _run_with_progress(
     """
 
     if on_stage_progress is None:
-        subprocess.run(args, check=True)
+        subprocess.run(args, check=True, creationflags=_NO_WINDOW)
         return
 
-    process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        creationflags=_NO_WINDOW,
+    )
     assert process.stderr is not None
 
     global _active_process
