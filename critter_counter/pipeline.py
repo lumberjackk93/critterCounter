@@ -12,6 +12,7 @@ incrementally-resumable JSON file, so an interrupted run can pick back up.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -38,6 +39,29 @@ def _app_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent
+
+
+def card_fingerprint(images: list[Path], source_folder: Path) -> str:
+    """Short digest identifying this exact set of photos.
+
+    Keyed on the file list rather than the folder path because every card mounts at the
+    same drive letter: swapping SD cards would otherwise look like the same job, and the
+    resume logic (each stage skips if its output JSON exists) would silently report the
+    previous card's animals for the new card.
+    """
+
+    digest = hashlib.sha1()
+    for path in sorted(images):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        try:
+            name = str(path.relative_to(source_folder))
+        except ValueError:
+            name = path.name
+        digest.update(f"{name}|{stat.st_size}|{int(stat.st_mtime)}\n".encode())
+    return digest.hexdigest()[:12]
 
 def _find_distribution_root() -> Path:
     """Locates the folder containing venv/ and models/, dev or packaged.
@@ -123,27 +147,34 @@ def _run_with_progress(
         subprocess.run(args, check=True)
         return
 
-    process = subprocess.Popen(
-        args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
-    )
-    buf = ""
+    process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     assert process.stderr is not None
+
+    # Read in chunks, not per-character: tqdm redraws its bar many times a second and
+    # a slow reader lets the pipe buffer fill, which blocks the child mid-inference and
+    # drags a 1.2s/image job down to 8s/image. read1 returns as soon as any bytes are
+    # available rather than waiting for a full buffer. Everything read is echoed onward
+    # so stderr redirected to a log file still shows the run's output.
+    buf = ""
     while True:
-        char = process.stderr.read(1)
-        if char == "":
+        raw = process.stderr.read1(8192)
+        if not raw:
             break
-        if char in ("\r", "\n"):
-            if buf:
-                last_match = None
-                for last_match in _PROGRESS_RE.finditer(buf):
-                    pass
-                if last_match:
-                    n, total = int(last_match.group(1)), int(last_match.group(2))
-                    if total > 0:
-                        on_stage_progress(min(n / total, 1.0))
-            buf = ""
-        else:
-            buf += char
+        chunk = raw.decode("utf-8", errors="replace")
+        sys.stderr.write(chunk)
+        sys.stderr.flush()
+
+        buf += chunk
+        segments = re.split(r"[\r\n]", buf)
+        buf = segments.pop()
+        last_match = None
+        for segment in segments:
+            for last_match in _PROGRESS_RE.finditer(segment):
+                pass
+        if last_match:
+            n, total = int(last_match.group(1)), int(last_match.group(2))
+            if total > 0:
+                on_stage_progress(min(n / total, 1.0))
 
     process.wait()
     if process.returncode != 0:
@@ -176,7 +207,14 @@ def run_detector_stage(
         str(checkpoint_path),
     ]
     if checkpoint_path.exists():
-        args += ["--resume_from_checkpoint", str(checkpoint_path)]
+        # --allow_checkpoint_overwrite is required alongside --resume_from_checkpoint:
+        # we read from and keep writing to the same file, and MegaDetector otherwise
+        # refuses to start rather than clobber an existing checkpoint.
+        args += [
+            "--resume_from_checkpoint",
+            str(checkpoint_path),
+            "--allow_checkpoint_overwrite",
+        ]
 
     _run_with_progress(args, on_stage_progress)
 
@@ -286,7 +324,9 @@ def sanitize_folder_name(name: str) -> str:
     return name.translate(_INVALID_FOLDER_CHARS).strip() or UNKNOWN_LABEL
 
 
-def load_results(ensemble_json: Path) -> dict[str, ImageResult]:
+def load_results(
+    ensemble_json: Path, confidence_threshold: float = SPECIES_CONFIDENCE_THRESHOLD
+) -> dict[str, ImageResult]:
     with open(ensemble_json, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -301,7 +341,7 @@ def load_results(ensemble_json: Path) -> dict[str, ImageResult]:
         animal_box_count = len(detections)
 
         if has_detection:
-            if name == _NO_CV_RESULT or score < SPECIES_CONFIDENCE_THRESHOLD:
+            if name == _NO_CV_RESULT or score < confidence_threshold:
                 name = UNKNOWN_LABEL
             else:
                 name = sanitize_folder_name(name)
@@ -335,7 +375,26 @@ def group_into_events(images: list[ImageResult], gap_seconds: int = EVENT_GAP_SE
     return events
 
 
-def copy_good_photos(events: list[Event], dest_root: Path) -> int:
+def destination_filename(image_path: Path, source_folder: Path) -> str:
+    """Prefixes the camera's folder name onto the filename.
+
+    Trail cams restart numbering in every folder, so 100MUDDY, 101MUDDY and 102MUDDY
+    each contain their own MUD_0001.JPG. Copying those into a single species folder by
+    bare filename would silently overwrite all but the last one.
+    """
+
+    try:
+        relative = image_path.relative_to(source_folder)
+    except ValueError:
+        return image_path.name
+
+    subfolders = relative.parts[:-1]
+    if not subfolders:
+        return image_path.name
+    return "_".join((*subfolders, image_path.name))
+
+
+def copy_good_photos(events: list[Event], dest_root: Path, source_folder: Path) -> int:
     """Copies every photo with a detection into dest_root/<species>/<filename>."""
 
     copied = 0
@@ -345,13 +404,13 @@ def copy_good_photos(events: list[Event], dest_root: Path) -> int:
                 continue
             species_folder = dest_root / img.species
             species_folder.mkdir(parents=True, exist_ok=True)
-            dest = species_folder / img.filepath.name
+            dest = species_folder / destination_filename(img.filepath, source_folder)
             shutil.copy2(img.filepath, dest)
             copied += 1
     return copied
 
 
-def write_excel_report(events: list[Event], dest_path: Path) -> None:
+def write_excel_report(events: list[Event], dest_path: Path, source_folder: Path) -> None:
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -388,7 +447,9 @@ def write_excel_report(events: list[Event], dest_path: Path) -> None:
     for event in events:
         for species in sorted(event.species_present):
             filenames = ", ".join(
-                img.filepath.name for img in event.images if img.species == species
+                destination_filename(img.filepath, source_folder)
+                for img in event.images
+                if img.species == species
             )
             detail.append(
                 [
@@ -407,6 +468,8 @@ def run_pipeline(
     output_root: Path,
     work_dir: Path,
     on_progress: Optional[ProgressCallback] = None,
+    confidence_threshold: float = SPECIES_CONFIDENCE_THRESHOLD,
+    event_gap_seconds: int = EVENT_GAP_SECONDS,
 ) -> tuple[Path, list[Event]]:
     """Runs the full pipeline for one card.
 
@@ -423,13 +486,17 @@ def run_pipeline(
         overall = weight_before + stage_fraction * STAGE_WEIGHTS[stage]
         on_progress(overall, f"{stage.capitalize()}: {stage_fraction * 100:.0f}%")
 
-    work_dir.mkdir(parents=True, exist_ok=True)
-
     all_images = [
         p
         for p in source_folder.rglob("*")
         if p.suffix.lower() in IMAGE_EXTENSIONS
     ]
+
+    # Per-card scratch space, so resuming an interrupted run reuses its own cached
+    # stages while a different card always starts clean.
+    work_dir = work_dir / card_fingerprint(all_images, source_folder)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
     filepaths_txt = work_dir / "filepaths.txt"
     filepaths_txt.write_text("\n".join(str(p) for p in all_images), encoding="utf-8")
 
@@ -455,8 +522,8 @@ def run_pipeline(
     ensemble_json = work_dir / "ensemble.json"
     run_ensemble_stage(filepaths_txt, classifications_json, detections_json, ensemble_json)
 
-    results = load_results(ensemble_json)
-    events = group_into_events(list(results.values()))
+    results = load_results(ensemble_json, confidence_threshold)
+    events = group_into_events(list(results.values()), event_gap_seconds)
 
     finished = datetime.now()
     source_names = "-".join(
@@ -466,8 +533,8 @@ def run_pipeline(
     session_folder = output_root / session_name
     session_folder.mkdir(parents=True, exist_ok=True)
 
-    copy_good_photos(events, session_folder)
-    write_excel_report(events, session_folder / "report.xlsx")
+    copy_good_photos(events, session_folder, source_folder)
+    write_excel_report(events, session_folder / "report.xlsx", source_folder)
 
     if on_progress is not None:
         on_progress(1.0, "Done")

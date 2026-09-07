@@ -17,9 +17,15 @@ def main() -> None:
 
     config = load_config()
     output_root = Path(config["output_folder"])
-    work_dir = args.work_dir or Path(r"C:\Users\txchi\MegaDetector\work_card")
+    work_dir = args.work_dir or (Path.home() / ".critter_counter" / "work")
 
-    session_folder, events = run_pipeline(args.source_folder, output_root, work_dir)
+    session_folder, events = run_pipeline(
+        args.source_folder,
+        output_root,
+        work_dir,
+        confidence_threshold=config["species_confidence_threshold"],
+        event_gap_seconds=config["event_gap_seconds"],
+    )
     print(f"Done. {len(events)} events found. Results in: {session_folder}")
 
 

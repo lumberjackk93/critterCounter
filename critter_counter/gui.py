@@ -20,10 +20,13 @@ from tkinter import filedialog
 from config import load_config
 from pipeline import Event, run_pipeline
 
-customtkinter_appearance = ctk.set_appearance_mode("system")
+ctk.set_appearance_mode("system")
 ctk.set_default_color_theme("green")
 
-WORK_DIR = Path(r"C:\Users\txchi\MegaDetector\work_card")
+# Scratch space for the per-card intermediate JSON stages. Kept under the user's home
+# rather than next to the app so it still works if the app is installed somewhere
+# read-only, and so it survives replacing the app folder with a newer build.
+WORK_DIR = Path.home() / ".critter_counter" / "work"
 
 
 def detect_dcim_drives() -> list[Path]:
@@ -49,10 +52,12 @@ class CritterCounterApp(ctk.CTk):
         self.select_frame = ctk.CTkFrame(self)
         self.progress_frame = ctk.CTkFrame(self)
         self.results_frame = ctk.CTkFrame(self)
+        self.error_frame = ctk.CTkFrame(self)
 
         self._build_select_frame()
         self._build_progress_frame()
         self._build_results_frame()
+        self._build_error_frame()
 
         self.show_select_frame()
 
@@ -107,6 +112,8 @@ class CritterCounterApp(ctk.CTk):
     def show_select_frame(self) -> None:
         self.progress_frame.pack_forget()
         self.results_frame.pack_forget()
+        self.error_frame.pack_forget()
+        self._refresh_drive_buttons()
         self.select_frame.pack(fill="both", expand=True)
 
     # ---- Frame: progress ----------------------------------------------------
@@ -143,7 +150,12 @@ class CritterCounterApp(ctk.CTk):
         try:
             output_root = Path(self.config_data["output_folder"])
             session_folder, events = run_pipeline(
-                self.selected_folder, output_root, WORK_DIR, on_progress=on_progress
+                self.selected_folder,
+                output_root,
+                WORK_DIR,
+                on_progress=on_progress,
+                confidence_threshold=self.config_data["species_confidence_threshold"],
+                event_gap_seconds=self.config_data["event_gap_seconds"],
             )
             self.progress_queue.put(("done", session_folder, events))
         except Exception:
@@ -187,6 +199,20 @@ class CritterCounterApp(ctk.CTk):
 
         self._result_session_folder: Path | None = None
 
+    def _build_error_frame(self) -> None:
+        f = self.error_frame
+        ctk.CTkLabel(
+            f, text="Something went wrong", font=ctk.CTkFont(size=20, weight="bold")
+        ).pack(pady=(25, 5))
+        ctk.CTkLabel(
+            f, text="Nothing was lost - finished work is saved and will be reused on retry.",
+            text_color="gray",
+        ).pack(pady=(0, 10))
+        self.error_detail = ctk.CTkTextbox(f, width=450, height=160, wrap="word")
+        self.error_detail.pack(padx=20, pady=5)
+        self.error_detail.configure(state="disabled")
+        ctk.CTkButton(f, text="Back", command=self.show_select_frame).pack(pady=15)
+
     def _show_results(self, session_folder: Path, events: list[Event]) -> None:
         self._result_session_folder = session_folder
 
@@ -218,10 +244,19 @@ class CritterCounterApp(ctk.CTk):
             os.startfile(self._result_session_folder / "report.xlsx")
 
     def _show_error(self, error_text: str) -> None:
+        """Shows the failure in the window itself.
+
+        This runs under pythonw.exe, which has no console, so anything written to
+        stdout/stderr would vanish and the user would just see the app give up.
+        """
+
         self.progress_frame.pack_forget()
-        self.select_frame.pack(fill="both", expand=True)
-        self.selected_label.configure(text=f"Error - see details below", text_color="red")
-        print(error_text)
+        self.results_frame.pack_forget()
+        self.error_detail.configure(state="normal")
+        self.error_detail.delete("1.0", "end")
+        self.error_detail.insert("1.0", error_text)
+        self.error_detail.configure(state="disabled")
+        self.error_frame.pack(fill="both", expand=True)
 
 
 if __name__ == "__main__":
