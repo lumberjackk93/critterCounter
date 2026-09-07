@@ -13,14 +13,50 @@ incrementally-resumable JSON file, so an interrupted run can pick back up.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Optional
 
-VENV_PYTHON = Path(r"C:\Users\txchi\MegaDetector\venv\Scripts\python.exe")
-DETECTOR_MODEL = Path(r"C:\Users\txchi\MegaDetector\models\md_v5a.0.1.pt")
+ProgressCallback = Callable[[float, str], None]
+_PROGRESS_RE = re.compile(r"(\d+)/(\d+)")
+
+# Rough share of total wall-clock time each stage takes, used to blend per-stage
+# progress into one overall bar. Detection (GPU) dominates; classification (CPU) is
+# fast because it only needs a small crop per image; ensembling is pure Python, no
+# model inference, and finishes in seconds regardless of image count.
+STAGE_WEIGHTS = {"detector": 0.80, "classifier": 0.18, "ensemble": 0.02}
+
+
+def _app_root() -> Path:
+    """Directory this app is running from, whether frozen (PyInstaller) or not."""
+
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent
+
+def _find_distribution_root() -> Path:
+    """Locates the folder containing venv/ and models/, dev or packaged.
+
+    Dev layout: MegaDetector/{venv,models,app/critter_counter/pipeline.py}, so the
+    root is two levels above this file. Packaged layout: the launcher exe sits next to
+    venv/ and models/ directly. Whichever location actually has a models/ folder wins.
+    """
+
+    candidates = [_app_root(), _app_root().parent.parent]
+    for candidate in candidates:
+        if (candidate / "models").is_dir():
+            return candidate
+    return candidates[-1]
+
+
+_DIST_ROOT = _find_distribution_root()
+VENV_PYTHON = _DIST_ROOT / "venv" / "Scripts" / "python.exe"
+DETECTOR_MODEL = _DIST_ROOT / "models" / "md_v5a.0.1.pt"
 
 CATEGORY_LABEL = {"1": "animal", "2": "human", "3": "vehicle"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg"}
@@ -73,7 +109,53 @@ class Event:
         )
 
 
-def run_detector_stage(image_folder: Path, output_json: Path, checkpoint_path: Path) -> None:
+def _run_with_progress(
+    args: list[str], on_stage_progress: Optional[Callable[[float], None]] = None
+) -> None:
+    """Runs a subprocess, optionally parsing tqdm-style N/Total progress from stderr.
+
+    tqdm rewrites its line in place with carriage returns rather than newlines, so
+    stderr is read character-by-character and split on both \\r and \\n to catch
+    every update rather than only the final line.
+    """
+
+    if on_stage_progress is None:
+        subprocess.run(args, check=True)
+        return
+
+    process = subprocess.Popen(
+        args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+    )
+    buf = ""
+    assert process.stderr is not None
+    while True:
+        char = process.stderr.read(1)
+        if char == "":
+            break
+        if char in ("\r", "\n"):
+            if buf:
+                last_match = None
+                for last_match in _PROGRESS_RE.finditer(buf):
+                    pass
+                if last_match:
+                    n, total = int(last_match.group(1)), int(last_match.group(2))
+                    if total > 0:
+                        on_stage_progress(min(n / total, 1.0))
+            buf = ""
+        else:
+            buf += char
+
+    process.wait()
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, args)
+
+
+def run_detector_stage(
+    image_folder: Path,
+    output_json: Path,
+    checkpoint_path: Path,
+    on_stage_progress: Optional[Callable[[float], None]] = None,
+) -> None:
     """Runs MegaDetector over a folder, resuming from checkpoint if present."""
 
     if output_json.exists():
@@ -96,7 +178,7 @@ def run_detector_stage(image_folder: Path, output_json: Path, checkpoint_path: P
     if checkpoint_path.exists():
         args += ["--resume_from_checkpoint", str(checkpoint_path)]
 
-    subprocess.run(args, check=True)
+    _run_with_progress(args, on_stage_progress)
 
 
 def convert_md_to_speciesnet_format(
@@ -136,7 +218,11 @@ def convert_md_to_speciesnet_format(
 
 
 def run_classifier_stage(
-    filepaths_txt: Path, detections_json: Path, output_json: Path, country: str = "USA"
+    filepaths_txt: Path,
+    detections_json: Path,
+    output_json: Path,
+    country: str = "USA",
+    on_stage_progress: Optional[Callable[[float], None]] = None,
 ) -> None:
     if output_json.exists():
         return
@@ -155,9 +241,8 @@ def run_classifier_stage(
         "--country",
         country,
         "--bypass_prompts",
-        "--noprogress_bars",
     ]
-    subprocess.run(args, check=True)
+    _run_with_progress(args, on_stage_progress)
 
 
 def run_ensemble_stage(
@@ -317,8 +402,26 @@ def write_excel_report(events: list[Event], dest_path: Path) -> None:
     wb.save(dest_path)
 
 
-def run_pipeline(source_folder: Path, output_root: Path, work_dir: Path) -> Path:
-    """Runs the full pipeline for one card and returns the session output folder."""
+def run_pipeline(
+    source_folder: Path,
+    output_root: Path,
+    work_dir: Path,
+    on_progress: Optional[ProgressCallback] = None,
+) -> tuple[Path, list[Event]]:
+    """Runs the full pipeline for one card.
+
+    Returns the session output folder and the grouped events, so a caller (e.g. a GUI)
+    can build a results summary without re-parsing the Excel report.
+    """
+
+    def report(stage: str, stage_fraction: float) -> None:
+        if on_progress is None:
+            return
+        weight_before = sum(
+            w for s, w in STAGE_WEIGHTS.items() if list(STAGE_WEIGHTS).index(s) < list(STAGE_WEIGHTS).index(stage)
+        )
+        overall = weight_before + stage_fraction * STAGE_WEIGHTS[stage]
+        on_progress(overall, f"{stage.capitalize()}: {stage_fraction * 100:.0f}%")
 
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -332,13 +435,22 @@ def run_pipeline(source_folder: Path, output_root: Path, work_dir: Path) -> Path
 
     md_json = work_dir / "detections_md_format.json"
     checkpoint = work_dir / "checkpoint.json"
-    run_detector_stage(source_folder, md_json, checkpoint)
+    run_detector_stage(
+        source_folder, md_json, checkpoint,
+        on_stage_progress=lambda f: report("detector", f),
+    )
 
     detections_json = work_dir / "detections_speciesnet_format.json"
     convert_md_to_speciesnet_format(md_json, detections_json, source_folder)
 
     classifications_json = work_dir / "classifications.json"
-    run_classifier_stage(filepaths_txt, detections_json, classifications_json)
+    run_classifier_stage(
+        filepaths_txt, detections_json, classifications_json,
+        on_stage_progress=lambda f: report("classifier", f),
+    )
+
+    if on_progress is not None:
+        on_progress(sum(list(STAGE_WEIGHTS.values())[:2]), "Finalizing results...")
 
     ensemble_json = work_dir / "ensemble.json"
     run_ensemble_stage(filepaths_txt, classifications_json, detections_json, ensemble_json)
@@ -357,4 +469,7 @@ def run_pipeline(source_folder: Path, output_root: Path, work_dir: Path) -> Path
     copy_good_photos(events, session_folder)
     write_excel_report(events, session_folder / "report.xlsx")
 
-    return session_folder
+    if on_progress is not None:
+        on_progress(1.0, "Done")
+
+    return session_folder, events
