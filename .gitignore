@@ -1,0 +1,10 @@
+venv/
+models/*.pt
+work/
+work_card/
+test_subset/
+test_output/
+test_work/
+results/
+__pycache__/
+*.pyc
