@@ -10,6 +10,8 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "critter_counter"))
 
 import pipeline  # noqa: E402
@@ -103,6 +105,19 @@ def test_fingerprint_is_stable_and_card_specific(tmp_path):
     second = source / "100MUDDY" / "MUD_0002.JPG"
     second.write_bytes(b"cccc")
     assert card_fingerprint([first, second], source) != swapped_card
+
+
+def test_empty_folder_raises_a_readable_error(tmp_path):
+    """Picking the wrong folder should explain itself, not stack-trace."""
+
+    empty = tmp_path / "DCIM"
+    empty.mkdir()
+
+    with pytest.raises(pipeline.NoPhotosFound) as excinfo:
+        pipeline.run_pipeline(empty, tmp_path / "out", tmp_path / "work")
+
+    assert "No JPG photos found" in str(excinfo.value)
+    assert not (tmp_path / "out").exists(), "should not create output for an empty card"
 
 
 def test_group_into_events_splits_on_gap():

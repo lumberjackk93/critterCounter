@@ -25,6 +25,11 @@ from pathlib import Path
 from typing import Callable, Optional
 
 ProgressCallback = Callable[[float, str], None]
+
+
+class NoPhotosFound(Exception):
+    """Raised when the chosen folder has no photos, so the user gets an explanation
+    rather than a stack trace from deep inside the detector."""
 _PROGRESS_RE = re.compile(r"(\d+)/(\d+)")
 
 # Rough share of total wall-clock time each stage takes, used to blend per-stage
@@ -588,6 +593,11 @@ def run_pipeline(
         for p in source_folder.rglob("*")
         if p.suffix.lower() in IMAGE_EXTENSIONS
     ]
+    if not all_images:
+        raise NoPhotosFound(
+            f"No JPG photos found in {source_folder}.\n\n"
+            "Pick the card's DCIM folder (or the drive itself) and try again."
+        )
 
     # Per-card scratch space, so resuming an interrupted run reuses its own cached
     # stages while a different card always starts clean.

@@ -172,6 +172,9 @@ class CritterCounterApp(ctk.CTk):
                 admin1_region=self.config_data["state"],
             )
             self.progress_queue.put(("done", session_folder, events))
+        except pipeline.NoPhotosFound as exc:
+            # Expected mistake (wrong folder picked), not a crash - no stack trace.
+            self.progress_queue.put(("error", str(exc), None))
         except Exception:
             self.progress_queue.put(("error", traceback.format_exc(), None))
 
