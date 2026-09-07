@@ -18,7 +18,7 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
 import pipeline
-from config import load_config
+from config import load_config, save_config
 from pipeline import Event, run_pipeline
 
 ctk.set_appearance_mode("system")
@@ -43,7 +43,7 @@ class CritterCounterApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Critter Counter")
-        self.geometry("520x420")
+        self.geometry("520x540")
         self.resizable(False, False)
 
         self.config_data = load_config()
@@ -56,11 +56,13 @@ class CritterCounterApp(ctk.CTk):
         self.progress_frame = ctk.CTkFrame(self)
         self.results_frame = ctk.CTkFrame(self)
         self.error_frame = ctk.CTkFrame(self)
+        self.settings_frame = ctk.CTkFrame(self)
 
         self._build_select_frame()
         self._build_progress_frame()
         self._build_results_frame()
         self._build_error_frame()
+        self._build_settings_frame()
 
         self.show_select_frame()
 
@@ -85,7 +87,12 @@ class CritterCounterApp(ctk.CTk):
             f, text="Go", font=ctk.CTkFont(size=18, weight="bold"), height=50,
             state="disabled", command=self._start_pipeline,
         )
-        self.go_button.pack(pady=15, padx=40, fill="x")
+        self.go_button.pack(pady=(15, 5), padx=40, fill="x")
+
+        ctk.CTkButton(
+            f, text="Settings", width=90, fg_color="transparent", border_width=1,
+            command=self._show_settings,
+        ).pack(pady=(0, 10))
 
     def _refresh_drive_buttons(self) -> None:
         for child in self.drive_buttons_frame.winfo_children():
@@ -116,6 +123,7 @@ class CritterCounterApp(ctk.CTk):
         self.progress_frame.pack_forget()
         self.results_frame.pack_forget()
         self.error_frame.pack_forget()
+        self.settings_frame.pack_forget()
         self._refresh_drive_buttons()
         self.select_frame.pack(fill="both", expand=True)
 
@@ -206,6 +214,101 @@ class CritterCounterApp(ctk.CTk):
         ctk.CTkButton(f, text="Process Another Card", command=self.show_select_frame).pack(pady=(25, 10))
 
         self._result_session_folder: Path | None = None
+
+    def _build_settings_frame(self) -> None:
+        f = self.settings_frame
+        ctk.CTkLabel(f, text="Settings", font=ctk.CTkFont(size=22, weight="bold")).pack(
+            pady=(20, 12)
+        )
+
+        rows = ctk.CTkFrame(f, fg_color="transparent")
+        rows.pack(padx=25, fill="x")
+
+        ctk.CTkLabel(rows, text="Save photos to").grid(row=0, column=0, sticky="w", pady=6)
+        self.output_entry = ctk.CTkEntry(rows, width=230)
+        self.output_entry.grid(row=0, column=1, pady=6)
+        ctk.CTkButton(rows, text="...", width=32, command=self._browse_output).grid(
+            row=0, column=2, padx=(6, 0)
+        )
+
+        ctk.CTkLabel(rows, text="State (e.g. TX)").grid(row=1, column=0, sticky="w", pady=6)
+        self.state_entry = ctk.CTkEntry(rows, width=230)
+        self.state_entry.grid(row=1, column=1, pady=6)
+
+        ctk.CTkLabel(rows, text="Species confidence").grid(row=2, column=0, sticky="w", pady=6)
+        self.threshold_entry = ctk.CTkEntry(rows, width=230)
+        self.threshold_entry.grid(row=2, column=1, pady=6)
+
+        ctk.CTkLabel(rows, text="Burst gap (seconds)").grid(row=3, column=0, sticky="w", pady=6)
+        self.gap_entry = ctk.CTkEntry(rows, width=230)
+        self.gap_entry.grid(row=3, column=1, pady=6)
+
+        ctk.CTkLabel(
+            f,
+            text="Setting your state helps the AI rule out species that don't live\n"
+            "near you, so fewer photos end up labeled Unknown.",
+            text_color="gray",
+            justify="left",
+        ).pack(pady=(12, 5), padx=25)
+
+        self.settings_error_label = ctk.CTkLabel(f, text="", text_color="red")
+        self.settings_error_label.pack()
+
+        buttons = ctk.CTkFrame(f, fg_color="transparent")
+        buttons.pack(pady=10)
+        ctk.CTkButton(buttons, text="Save", command=self._save_settings).pack(
+            side="left", padx=6
+        )
+        ctk.CTkButton(
+            buttons, text="Cancel", fg_color="gray", command=self.show_select_frame
+        ).pack(side="left", padx=6)
+
+    def _browse_output(self) -> None:
+        chosen = filedialog.askdirectory(title="Where should photos be saved?")
+        if chosen:
+            self.output_entry.delete(0, "end")
+            self.output_entry.insert(0, chosen)
+
+    def _show_settings(self) -> None:
+        for entry, key in (
+            (self.output_entry, "output_folder"),
+            (self.state_entry, "state"),
+            (self.threshold_entry, "species_confidence_threshold"),
+            (self.gap_entry, "event_gap_seconds"),
+        ):
+            entry.delete(0, "end")
+            entry.insert(0, str(self.config_data[key]))
+        self.settings_error_label.configure(text="")
+        self.select_frame.pack_forget()
+        self.settings_frame.pack(fill="both", expand=True)
+
+    def _save_settings(self) -> None:
+        try:
+            threshold = float(self.threshold_entry.get())
+            gap = int(self.gap_entry.get())
+        except ValueError:
+            self.settings_error_label.configure(
+                text="Confidence must be a number (0-1) and gap a whole number."
+            )
+            return
+        if not 0.0 <= threshold <= 1.0:
+            self.settings_error_label.configure(text="Confidence must be between 0 and 1.")
+            return
+        if gap < 0:
+            self.settings_error_label.configure(text="Burst gap cannot be negative.")
+            return
+
+        self.config_data.update(
+            {
+                "output_folder": self.output_entry.get().strip(),
+                "state": self.state_entry.get().strip().upper(),
+                "species_confidence_threshold": threshold,
+                "event_gap_seconds": gap,
+            }
+        )
+        save_config(self.config_data)
+        self.settings_frame.pack_forget()
+        self.show_select_frame()
 
     def _on_close(self) -> None:
         """Stops the model subprocess before exiting.
