@@ -11,6 +11,7 @@ import os
 import queue
 import string
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from tkinter import filedialog, messagebox
 
 import cards
 import pipeline
+import timing
 from config import load_config, save_config
 from pipeline import Event, find_batches, folder_image_count, run_batch
 
@@ -53,6 +55,8 @@ class CritterCounterApp(ctk.CTk):
         self.card_identity = None
         self.progress_queue: queue.Queue = queue.Queue()
         self.run_in_progress = False
+        self.run_started_at = 0.0
+        self.time_estimate: float | None = None
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         pipeline.set_log_file(LOG_PATH)
 
@@ -172,8 +176,14 @@ class CritterCounterApp(ctk.CTk):
         self.progress_bar = ctk.CTkProgressBar(f, width=400)
         self.progress_bar.set(0)
         self.progress_bar.pack(pady=10)
-        self.progress_status_label = ctk.CTkLabel(f, text="Starting...")
-        self.progress_status_label.pack(pady=10)
+
+        self.time_remaining_label = ctk.CTkLabel(
+            f, text="estimating time remaining...", font=ctk.CTkFont(size=15, weight="bold")
+        )
+        self.time_remaining_label.pack(pady=(4, 2))
+
+        self.progress_status_label = ctk.CTkLabel(f, text="Starting...", text_color="gray")
+        self.progress_status_label.pack(pady=(0, 8))
         ctk.CTkLabel(
             f, text="This can take several hours for a full card.\nYou can leave this running in the background.",
             text_color="gray",
@@ -185,6 +195,9 @@ class CritterCounterApp(ctk.CTk):
         self.select_frame.pack_forget()
         self.progress_bar.set(0)
         self.progress_status_label.configure(text="Starting...")
+        self.time_remaining_label.configure(text="estimating time remaining...")
+        self.run_started_at = time.monotonic()
+        self.time_estimate = None
         self.progress_frame.pack(fill="both", expand=True)
         self.run_in_progress = True
 
@@ -227,6 +240,15 @@ class CritterCounterApp(ctk.CTk):
                     _, fraction, status = message
                     self.progress_bar.set(fraction)
                     self.progress_status_label.configure(text=status)
+
+                    elapsed = time.monotonic() - self.run_started_at
+                    self.time_estimate = timing.smooth_estimate(
+                        self.time_estimate,
+                        timing.estimate_remaining_seconds(elapsed, fraction),
+                    )
+                    self.time_remaining_label.configure(
+                        text=timing.format_duration(self.time_estimate)
+                    )
                 elif kind == "done":
                     _, session_folder, events = message
                     self.run_in_progress = False
