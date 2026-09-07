@@ -39,6 +39,29 @@ For GPU acceleration on a machine without an NVIDIA GPU, also install `torch-dir
 python run_card.py <path to SD card / DCIM folder>
 ```
 
+### Folders containing several card dumps
+
+Point it at a parent folder and each subfolder holding photos is processed as its own
+job, with its own species folders and report, plus a `combined-report.xlsx` totalling
+species across all of them:
+
+```
+UnAudited/            ->   2026-09-07 1700 - UnAudited/
+  DCIM/                      DCIM/                  (photos + report.xlsx)
+  North camera/              North camera/          (photos + report.xlsx)
+  South camera/              South camera/          (photos + report.xlsx)
+                             combined-report.xlsx
+```
+
+This split is a correctness matter, not tidiness. Events are grouped by how close
+together photos were taken, so processing two cameras as one batch would merge
+unrelated sightings into a single event whenever their clocks happened to line up, and
+a census built on that would undercount.
+
+A folder with photos sitting directly in it is treated as one job, since that is a
+single camera dump rather than a collection of them. Subfolder names become the result
+folder names, so naming them by camera or location pays off in the report.
+
 Re-running the same card is cheap: each stage caches its output, so a repeat run skips
 straight to regenerating the photo folders and report. That is the fast way to see the
 effect of a different confidence threshold without redoing hours of inference.

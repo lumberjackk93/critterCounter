@@ -563,6 +563,39 @@ def write_excel_report(events: list[Event], dest_path: Path, source_folder: Path
     wb.save(dest_path)
 
 
+def folder_image_count(folder: Path) -> int:
+    return sum(
+        1 for p in folder.rglob("*") if p.suffix.lower() in IMAGE_EXTENSIONS
+    )
+
+
+def find_batches(folder: Path) -> list[Path]:
+    """Splits a folder into independently-processed jobs.
+
+    Each immediate subfolder holding photos is its own job. Keeping them separate
+    matters for more than tidiness: events are grouped by how close together photos
+    were taken, so processing two cameras as one batch would merge unrelated
+    sightings into a single event whenever their clocks happened to line up.
+
+    A folder with photos sitting directly in it is treated as one job, since that is
+    a single camera dump rather than a collection.
+    """
+
+    if not folder.is_dir():
+        return [folder]
+
+    has_loose_photos = any(
+        p.suffix.lower() in IMAGE_EXTENSIONS for p in folder.iterdir() if p.is_file()
+    )
+    if has_loose_photos:
+        return [folder]
+
+    subfolders = sorted(
+        d for d in folder.iterdir() if d.is_dir() and folder_image_count(d) > 0
+    )
+    return subfolders or [folder]
+
+
 def run_pipeline(
     source_folder: Path,
     output_root: Path,
@@ -572,6 +605,7 @@ def run_pipeline(
     event_gap_seconds: int = EVENT_GAP_SECONDS,
     country: str = "USA",
     admin1_region: str = "",
+    session_folder: Optional[Path] = None,
 ) -> tuple[Path, list[Event]]:
     """Runs the full pipeline for one card.
 
@@ -635,12 +669,12 @@ def run_pipeline(
     results = load_results(ensemble_json, confidence_threshold)
     events = group_into_events(list(results.values()), event_gap_seconds)
 
-    finished = datetime.now()
-    source_names = "-".join(
-        sorted({p.name for p in source_folder.iterdir() if p.is_dir()})
-    ) or source_folder.name
-    session_name = f"{finished:%Y-%m-%d %H%M} - {source_names}"
-    session_folder = output_root / session_name
+    if session_folder is None:
+        finished = datetime.now()
+        source_names = "-".join(
+            sorted({p.name for p in source_folder.iterdir() if p.is_dir()})
+        ) or source_folder.name
+        session_folder = output_root / f"{finished:%Y-%m-%d %H%M} - {source_names}"
     session_folder.mkdir(parents=True, exist_ok=True)
 
     copy_good_photos(events, session_folder, source_folder)
@@ -650,3 +684,129 @@ def run_pipeline(
         on_progress(1.0, "Done")
 
     return session_folder, events
+
+
+def write_combined_report(
+    batches: list[tuple[str, list[Event]]], dest_path: Path
+) -> None:
+    """One workbook totalling species across every folder in a batch run."""
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    summary = wb.active
+    summary.title = "All folders"
+    summary.append(["Species", "Event Count", "Photo Count", "Seen in folders"])
+
+    totals: dict[str, dict] = {}
+    for name, events in batches:
+        for event in events:
+            for species in event.species_present:
+                entry = totals.setdefault(
+                    species, {"events": 0, "photos": 0, "folders": set()}
+                )
+                entry["events"] += 1
+                entry["folders"].add(name)
+            for img in event.images:
+                if img.has_detection:
+                    totals.setdefault(
+                        img.species, {"events": 0, "photos": 0, "folders": set()}
+                    )["photos"] += 1
+
+    for species in sorted(totals):
+        entry = totals[species]
+        summary.append(
+            [
+                species,
+                entry["events"],
+                entry["photos"],
+                ", ".join(sorted(entry["folders"])),
+            ]
+        )
+
+    by_folder = wb.create_sheet("By folder")
+    by_folder.append(["Folder", "Species", "Event Count", "Photo Count"])
+    for name, events in batches:
+        per_species: dict[str, dict] = {}
+        for event in events:
+            for species in event.species_present:
+                per_species.setdefault(species, {"events": 0, "photos": 0})["events"] += 1
+            for img in event.images:
+                if img.has_detection:
+                    per_species.setdefault(img.species, {"events": 0, "photos": 0})[
+                        "photos"
+                    ] += 1
+        if not per_species:
+            by_folder.append([name, "(nothing found)", 0, 0])
+        for species in sorted(per_species):
+            by_folder.append(
+                [name, species, per_species[species]["events"], per_species[species]["photos"]]
+            )
+
+    wb.save(dest_path)
+
+
+def run_batch(
+    parent_folder: Path,
+    output_root: Path,
+    work_dir: Path,
+    on_progress: Optional[ProgressCallback] = None,
+    on_batch_start: Optional[Callable[[int, int, Path], None]] = None,
+    **pipeline_kwargs,
+) -> tuple[Path, list[tuple[str, list[Event]]]]:
+    """Processes each subfolder of parent_folder as its own job.
+
+    Returns the session folder and per-folder events. Each subfolder keeps its own
+    photo folders and report; a combined workbook totals them.
+    """
+
+    batches = find_batches(parent_folder)
+    if len(batches) == 1 and batches[0] == parent_folder:
+        session, events = run_pipeline(
+            parent_folder, output_root, work_dir, on_progress, **pipeline_kwargs
+        )
+        return session, [(parent_folder.name, events)]
+
+    session_folder = output_root / (
+        f"{datetime.now():%Y-%m-%d %H%M} - {parent_folder.name}"
+    )
+    session_folder.mkdir(parents=True, exist_ok=True)
+
+    # Weight progress by photo count so the bar reflects work done, not folders done.
+    sizes = [max(folder_image_count(b), 1) for b in batches]
+    total = sum(sizes)
+    completed = 0
+
+    results: list[tuple[str, list[Event]]] = []
+    for index, (batch, size) in enumerate(zip(batches, sizes)):
+        if on_batch_start is not None:
+            on_batch_start(index + 1, len(batches), batch)
+
+        def batch_progress(fraction: float, status: str, _s=size, _c=completed) -> None:
+            if on_progress is not None:
+                on_progress(
+                    (_c + fraction * _s) / total,
+                    f"[{index + 1}/{len(batches)}] {batch.name} - {status}",
+                )
+
+        try:
+            _, events = run_pipeline(
+                batch,
+                output_root,
+                work_dir,
+                batch_progress,
+                session_folder=session_folder / batch.name,
+                **pipeline_kwargs,
+            )
+            results.append((batch.name, events))
+        except NoPhotosFound:
+            results.append((batch.name, []))
+
+        completed += size
+
+    write_combined_report(results, session_folder / "combined-report.xlsx")
+
+    if on_progress is not None:
+        on_progress(1.0, "Done")
+
+    return session_folder, results

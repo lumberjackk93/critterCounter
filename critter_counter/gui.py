@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox
 import cards
 import pipeline
 from config import load_config, save_config
-from pipeline import Event, run_pipeline
+from pipeline import Event, find_batches, folder_image_count, run_batch
 
 ctk.set_appearance_mode("system")
 ctk.set_default_color_theme("green")
@@ -138,6 +138,18 @@ class CritterCounterApp(ctk.CTk):
         if self.selected_folder != folder:
             return  # a different card was picked while this one was being read
         self.card_identity = identity
+        if identity is not None:
+            batches = find_batches(folder)
+            if len(batches) > 1:
+                listed = ", ".join(
+                    f"{b.name} ({folder_image_count(b):,})" for b in batches[:3]
+                )
+                if len(batches) > 3:
+                    listed += f", +{len(batches) - 3} more"
+                summary += (
+                    f"\n\n{len(batches)} separate sets, processed one at a time "
+                    f"so cameras aren't mixed together:\n{listed}"
+                )
         self.selected_label.configure(text=summary, text_color=("black", "white"))
         if identity is not None and identity.photo_count:
             self.go_button.configure(state="normal")
@@ -184,7 +196,7 @@ class CritterCounterApp(ctk.CTk):
 
         try:
             output_root = Path(self.config_data["output_folder"])
-            session_folder, events = run_pipeline(
+            session_folder, results = run_batch(
                 self.selected_folder,
                 output_root,
                 WORK_DIR,
@@ -194,6 +206,7 @@ class CritterCounterApp(ctk.CTk):
                 country=self.config_data["country"],
                 admin1_region=self.config_data["state"],
             )
+            events = [event for _, batch_events in results for event in batch_events]
             if self.card_identity is not None:
                 cards.record_run(self.card_identity, session_folder)
             self.progress_queue.put(("done", session_folder, events))

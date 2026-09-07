@@ -28,15 +28,29 @@ class CardIdentity:
     photo_count: int
     folders: list[str] = field(default_factory=list)
     fingerprint: str = ""
+    removable: bool = True
+    source: str = ""
 
     @property
     def key(self) -> str:
-        """Stable across adding photos; the fingerprint deliberately is not."""
+        """Stable across adding photos; the fingerprint deliberately is not.
 
-        return self.serial or f"{self.drive}|{self.label}"
+        Only removable media is keyed by volume serial. Every folder on the internal
+        drive shares one serial, so keying those by serial would make unrelated
+        folders - a OneDrive archive and a copied card, say - look like the same
+        source and report each other's history.
+        """
+
+        if self.removable and self.serial:
+            return self.serial
+        return self.source or f"{self.drive}|{self.label}"
 
     @property
     def name(self) -> str:
+        if not self.removable:
+            # A folder on the internal drive is not a card; naming it after the
+            # volume ("Windows (C:)") would be actively misleading.
+            return Path(self.source).name if self.source else self.drive
         if self.label:
             return f"{self.label} ({self.drive})"
         if self.folders:
@@ -70,6 +84,21 @@ def _volume_info(drive_root: str) -> tuple[str, str]:
         return "", ""
 
 
+DRIVE_REMOVABLE = 2
+
+
+def _is_removable(drive_root: str) -> bool:
+    try:
+        return (
+            ctypes.windll.kernel32.GetDriveTypeW(  # type: ignore[attr-defined]
+                ctypes.c_wchar_p(drive_root)
+            )
+            == DRIVE_REMOVABLE
+        )
+    except Exception:
+        return False
+
+
 def identify(source_folder: Path) -> CardIdentity:
     images = [
         p for p in source_folder.rglob("*") if p.suffix.lower() in IMAGE_EXTENSIONS
@@ -77,7 +106,11 @@ def identify(source_folder: Path) -> CardIdentity:
     folders = sorted({p.parent.name for p in images})
 
     drive = source_folder.drive or str(source_folder)
-    label, serial = _volume_info(drive + "\\") if source_folder.drive else ("", "")
+    if source_folder.drive:
+        label, serial = _volume_info(drive + "\\")
+        removable = _is_removable(drive + "\\")
+    else:
+        label, serial, removable = "", "", False
 
     return CardIdentity(
         drive=drive,
@@ -86,6 +119,8 @@ def identify(source_folder: Path) -> CardIdentity:
         photo_count=len(images),
         folders=folders,
         fingerprint=card_fingerprint(images, source_folder),
+        removable=removable,
+        source=str(source_folder.resolve()),
     )
 
 
@@ -126,7 +161,7 @@ def describe(identity: CardIdentity, history: Optional[dict] = None) -> str:
     entry = history.get(identity.key)
 
     lines = [
-        f"Card: {identity.name}",
+        f"{'Card' if identity.removable else 'Folder'}: {identity.name}",
         f"Photos: {identity.photo_count:,}"
         + (f" in {', '.join(identity.folders)}" if identity.folders else ""),
     ]
