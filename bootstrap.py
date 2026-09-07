@@ -100,19 +100,50 @@ def venv_python(root: Path) -> Path:
     return root / "venv" / "Scripts" / "python.exe"
 
 
+def _requirements_stamp(root: Path) -> str:
+    import hashlib
+
+    text = (root / "requirements.txt").read_bytes()
+    return hashlib.sha1(text).hexdigest()
+
+
+def _install_marker(root: Path) -> Path:
+    return root / "venv" / ".critter-counter-installed"
+
+
+def dependencies_installed(root: Path) -> bool:
+    """Whether the venv actually has the packages, not merely that it exists.
+
+    Creating the venv takes a second; filling it takes gigabytes. An interrupted setup
+    leaves a valid-looking but empty venv, and treating that as done means the next
+    launch skips installation and fails much later with a confusing import error. The
+    marker is written only after a successful install, and keyed to requirements.txt so
+    changing dependencies triggers a reinstall.
+    """
+
+    marker = _install_marker(root)
+    if not (venv_python(root).exists() and marker.exists()):
+        return False
+    try:
+        return marker.read_text(encoding="utf-8").strip() == _requirements_stamp(root)
+    except OSError:
+        return False
+
+
 def ensure_venv(root: Path, on_status: StatusCallback) -> Path:
     python = venv_python(root)
-    if python.exists():
+    if dependencies_installed(root):
         return python
 
     uv = ensure_uv(root, on_status)
 
     on_status("Setting up Python...", None)
-    subprocess.run(
-        [str(uv), "venv", str(root / "venv"), "--python", "3.12"],
-        check=True,
-        creationflags=_NO_WINDOW,
-    )
+    if not python.exists():
+        subprocess.run(
+            [str(uv), "venv", str(root / "venv"), "--python", "3.12"],
+            check=True,
+            creationflags=_NO_WINDOW,
+        )
 
     on_status("Downloading AI libraries (this is the long part)...", None)
     subprocess.run(
@@ -128,6 +159,8 @@ def ensure_venv(root: Path, on_status: StatusCallback) -> Path:
         check=True,
         creationflags=_NO_WINDOW,
     )
+
+    _install_marker(root).write_text(_requirements_stamp(root), encoding="utf-8")
     return python
 
 
@@ -164,7 +197,7 @@ def ensure_models(root: Path, on_status: StatusCallback) -> None:
 
 def is_ready(root: Path) -> bool:
     return (
-        venv_python(root).exists()
+        dependencies_installed(root)
         and (root / "models" / "md_v5a.0.1.pt").exists()
         and (root / "models" / "speciesnet" / "info.json").exists()
     )
