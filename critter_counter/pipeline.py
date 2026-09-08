@@ -284,6 +284,43 @@ def _run_with_progress(
         raise subprocess.CalledProcessError(process.returncode, args)
 
 
+@dataclass
+class Deployment:
+    """How long a camera was out, derived from the photos themselves.
+
+    Every photo counts, not just the ones with animals: blanks are what prove the
+    camera was still running on a given day, so excluding them would understate the
+    survey effort a census is measured against.
+    """
+
+    start: Optional[datetime]
+    end: Optional[datetime]
+    photo_count: int
+
+    @property
+    def days(self) -> int:
+        """Calendar days covered, counting both the first and last day."""
+
+        if self.start is None or self.end is None:
+            return 0
+        return (self.end.date() - self.start.date()).days + 1
+
+    @property
+    def date_range(self) -> str:
+        if self.start is None or self.end is None:
+            return "no photos"
+        return f"{self.start:%Y-%m-%d} to {self.end:%Y-%m-%d}"
+
+
+def deployment_from_events(events: list[Event]) -> Deployment:
+    timestamps = [img.timestamp for event in events for img in event.images]
+    if not timestamps:
+        return Deployment(start=None, end=None, photo_count=0)
+    return Deployment(
+        start=min(timestamps), end=max(timestamps), photo_count=len(timestamps)
+    )
+
+
 def run_detector_stage(
     image_folder: Path,
     output_json: Path,
@@ -472,15 +509,40 @@ def sanitize_folder_name(name: str) -> str:
 
 
 def load_results(
-    ensemble_json: Path, confidence_threshold: float = SPECIES_CONFIDENCE_THRESHOLD
+    ensemble_json: Path,
+    confidence_threshold: float = SPECIES_CONFIDENCE_THRESHOLD,
+    timestamp_cache: Optional[Path] = None,
 ) -> dict[str, ImageResult]:
     with open(ensemble_json, "r", encoding="utf-8") as f:
         data = json.load(f)
 
+    # Capture time comes from the photo itself, so regenerating a report later - after
+    # renaming folders, say - would otherwise need the card still plugged in. Caching
+    # the timestamps keeps that possible, and skips re-reading EXIF from tens of
+    # thousands of files on a slow card reader.
+    cached: dict[str, str] = {}
+    if timestamp_cache is not None and timestamp_cache.exists():
+        try:
+            cached = json.loads(timestamp_cache.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached = {}
+
     results: dict[str, ImageResult] = {}
+    missing = 0
     for pred in data["predictions"]:
         filepath = Path(pred["filepath"])
-        timestamp = image_timestamp(filepath)
+        key = str(filepath)
+
+        if filepath.exists():
+            timestamp = image_timestamp(filepath)
+            cached[key] = timestamp.isoformat()
+        elif key in cached:
+            timestamp = datetime.fromisoformat(cached[key])
+        else:
+            # No file and no remembered date: it cannot be placed in time, and
+            # guessing would corrupt both event grouping and the deployment range.
+            missing += 1
+            continue
         name = species_common_name(pred.get("prediction", ""))
         score = pred.get("prediction_score", 0.0)
         detections = pred.get("detections") or []
@@ -503,6 +565,19 @@ def load_results(
             confidence=score,
             animal_box_count=animal_box_count,
         )
+
+    if timestamp_cache is not None:
+        try:
+            timestamp_cache.write_text(json.dumps(cached), encoding="utf-8")
+        except OSError:
+            pass
+
+    if missing:
+        _emit(
+            f"\n{missing} photos could not be dated (files gone, no cached date) "
+            "and were left out of the report.\n"
+        )
+
     return results
 
 
@@ -563,6 +638,12 @@ def write_excel_report(events: list[Event], dest_path: Path, source_folder: Path
     wb = Workbook()
     summary = wb.active
     summary.title = "Summary"
+
+    deployment = deployment_from_events(events)
+    summary.append(["Deployment Date Range", deployment.date_range])
+    summary.append(["Count of Deployed (days)", deployment.days])
+    summary.append(["Photos Reviewed", deployment.photo_count])
+    summary.append([])
     summary.append(["Species", "Event Count", "Max Individuals", "Photo Count"])
 
     species_events: dict[str, int] = {}
@@ -713,7 +794,9 @@ def run_pipeline(
         country, admin1_region,
     )
 
-    results = load_results(ensemble_json, confidence_threshold)
+    results = load_results(
+        ensemble_json, confidence_threshold, work_dir / "timestamps.json"
+    )
     events = group_into_events(list(results.values()), event_gap_seconds)
 
     if session_folder is None:
@@ -743,6 +826,14 @@ def write_combined_report(
     wb = Workbook()
     summary = wb.active
     summary.title = "All folders"
+
+    overall = deployment_from_events(
+        [event for _, events in batches for event in events]
+    )
+    summary.append(["Deployment Date Range (all folders)", overall.date_range])
+    summary.append(["Count of Deployed (days)", overall.days])
+    summary.append(["Photos Reviewed", overall.photo_count])
+    summary.append([])
     summary.append(["Species", "Event Count", "Photo Count", "Seen in folders"])
 
     totals: dict[str, dict] = {}
@@ -768,6 +859,30 @@ def write_combined_report(
                 entry["events"],
                 entry["photos"],
                 ", ".join(sorted(entry["folders"])),
+            ]
+        )
+
+    deployments = wb.create_sheet("Deployments")
+    deployments.append(
+        [
+            "Folder",
+            "Deployment Date Range",
+            "First Photo",
+            "Last Photo",
+            "Count of Deployed (days)",
+            "Photos Reviewed",
+        ]
+    )
+    for name, events in batches:
+        d = deployment_from_events(events)
+        deployments.append(
+            [
+                name,
+                d.date_range,
+                d.start.strftime("%Y-%m-%d %H:%M:%S") if d.start else "",
+                d.end.strftime("%Y-%m-%d %H:%M:%S") if d.end else "",
+                d.days,
+                d.photo_count,
             ]
         )
 

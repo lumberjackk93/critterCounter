@@ -439,11 +439,17 @@ class CritterCounterApp(ctk.CTk):
             1 for event in events for img in event.images if img.has_detection
         )
 
+        deployment = pipeline.deployment_from_events(events)
+        header = (
+            f"Deployed {deployment.date_range} ({deployment.days} days), "
+            f"{deployment.photo_count:,} photos reviewed.\n\n"
+        )
+
         if species_counts:
             lines = [f"  {species}: {count}" for species, count in sorted(species_counts.items())]
-            summary = f"{total_photos} good photos saved, by species (event count):\n" + "\n".join(lines)
+            summary = header + f"{total_photos} good photos saved, by species (event count):\n" + "\n".join(lines)
         else:
-            summary = "No animals found in this batch."
+            summary = header + "No animals found."
 
         self.results_summary_label.configure(text=summary)
         self.progress_frame.pack_forget()
